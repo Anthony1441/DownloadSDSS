@@ -18,8 +18,8 @@ def download_fields(RA, DEC, out_path):
     """Attempts to download the 5 waveband field images to out_path.  Returns the
        fields downloaded as fits objects."""
     print 'Downloading', out_path.split('/')[-1]
-    proc = subprocess.Popen(['./downloadFields.sh', RA, DEC, out_path], stdout = subprocess.PIPE)
-    out, err = proc.communicate()
+    proc = subprocess.Popen(['./downloadFields.sh', RA, DEC, out_path], stdout = subprocess.PIPE, universal_newlines = True)
+    proc.stdout.close()
     res = proc.wait()
     if res != 0: 
         raise DownloadFieldsError
@@ -32,22 +32,18 @@ def download_fields(RA, DEC, out_path):
     return fields
 
 
-def save_crop_fits(f, refx, refy, size, path):
+def save_crop_fits(f, refx, refy, size, path, ra, dec):
     """Crops the image to 2*size x 2*size, with (refx, refy)
        being the cetner of the galaxy."""
     size = int(size / 2)
-    if refx - size < 0:
+    if refx - size < 0: 
         size = refx
-        print 'A', size
     if refx + size > f[0].data.shape[1] - 1:
         size = f[0].data.shape[1] - 1 - refx
-        print 'B', size
     if refy - size < 0:
         size = refy
-        print 'C', size
     if refy + size > f[0].data.shape[0] - 1:
         size = f[0].data.shape[0] - 1 - refy
-        print 'D', size
 
     xmin = refx - size
     xmax = refx + size
@@ -58,15 +54,24 @@ def save_crop_fits(f, refx, refy, size, path):
     nf = fits.PrimaryHDU()
     nf.data = f[0].data[ymin : ymax, xmin : xmax]
     nf.header = f[0].header
-    nf.header.update(wcs.WCS(f[0].header)[ymin : ymax, xmin: xmax].to_header())
+    
+    # remove the info in the header files that astropy ads
+    #for name in ('VERSIDL', 'VERSUIIL', 'VERSPOP', 'PSKY', 'RERUN'):
+    #    if name in nf.header: del nf.header[name] 
+    
+    # update the reference pixel information to be the center of the galaxy
+    nf.header['CRPIX1'] = refx
+    nf.header['CRPIX2'] = refy
+    nf.header['CRVAL1'] = float(ra)
+    nf.header['CRVAL2'] = float(dec)
     # save the file to specified path
     fits.HDUList([nf]).writeto(path, overwrite = True)
     return nf.data.shape, size * 2
 
+
 def get_num_stars(path, prob):
     """Runs the sextactor on the fits image and counts the number
-       of stars that have a class probability of prob.""" 
-    
+       of stars that have a class probability of prob."""     
     f = None 
     try:
         proc = subprocess.Popen(['./sex', path, '-CATALOG_NAME', 'star_out.txt'], stderr = subprocess.PIPE)
@@ -79,8 +84,8 @@ def get_num_stars(path, prob):
         for line in f.readlines()[4:]:
             values = ' '.join(line.rstrip().split()).split()
             # only load in the points that are likely to be stars
-            if float(values[3]) >= prob:
-                count += 1 
+            if float(values[3]) >= prob: count += 1 
+
         print '{} stars found.'.format(count) 
         return count
     
@@ -91,6 +96,8 @@ def get_num_stars(path, prob):
         if f is not None:
             f.close()
             os.remove('star_out.txt')
+
+
 
 
 
@@ -161,7 +168,7 @@ if __name__ == '__main__':
                 while num_stars < args.min_num_stars:
                     crop_size *= 1.25
                     print 'Running sextractor on image size of', crop_size
-                    res, size_used = save_crop_fits(fields[i], center_x, center_y, crop_size, path)
+                    res, size_used = save_crop_fits(fields[i], center_x, center_y, crop_size, path, args.RA, args.DEC)
                     num_stars = get_num_stars(path, args.star_class_prob)
                     # once the image can no longer get bigger
                     if size_used < int(crop_size / 2) * 2: 
@@ -169,7 +176,7 @@ if __name__ == '__main__':
                 result_crops.append(res)
             # otherwize we assume the crop_size has been found and just crop the image
             else:
-                result_crops.append(save_crop_fits(fields[i], center_x, center_y, crop_size, path)[0])
+                result_crops.append(save_crop_fits(fields[i], center_x, center_y, crop_size, path, args.RA, args.DEC)[0])
 
         # check that all the crops are the same size, if they arent then make them the same (chose smallest one)
         for i in range(len(result_crops) - 1):
@@ -184,30 +191,25 @@ if __name__ == '__main__':
                 for f in os.listdir(out_path): 
                     os.remove('{}/{}'.format(out_path, f))
                 for i in range(5):
-                    save_crop_fits(fields[i], gal_centers[i][0], gal_centers[i][1], smin, '{}/{}.fits'.format(out_path, color_names[i]))
+                    save_crop_fits(fields[i], gal_centers[i][0], gal_centers[i][1], smin, '{}/{}.fits'.format(out_path, color_names[i]), args.RA, args.DEC)
                 
                 break
                 
-    except IndexError, e:
+    except IndexError, e: 
         raise e
 
     finally:
-
         # clean up frame files
         for f in os.listdir(out_path):
             if 'frame' in f:
-                try:
-                    os.remove(os.path.join(out_path, f))
-                except: 
-                    pass
+                try: pass #os.remove(os.path.join(out_path, f))
+                except: pass
 
         # if core sumps were generated, remove them
         for f in os.listdir('.'):
             if 'core' in f:
-                try:
-                    os.remove(f)
-                except:
-                    pass
+                try: os.remove(f)
+                except: pass
                     
 
 
