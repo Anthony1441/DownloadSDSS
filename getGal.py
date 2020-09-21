@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 
 
 class DownloadFieldsError(Exception): pass
+
 class SextractorError(Exception): pass
 
 
@@ -21,20 +22,22 @@ def download_fields(RA, DEC, out_path):
     proc = subprocess.Popen(['./downloadFields.sh', RA, DEC, out_path], stdout = subprocess.PIPE, universal_newlines = True)
     proc.stdout.close()
     res = proc.wait()
-    if res != 0: 
-        raise DownloadFieldsError
+    if res != 0: raise DownloadFieldsError
 
     fields = [] 
     # return fields as astropy objects
     for f in sorted(os.listdir(out_path)):
         fields.append(fits.open(os.path.join(out_path, f), ignore_missing_end = True))
-    print 'Finished downloading {} fields.'.format(len(fields))
+    print 'Finished downloading {} field images.'.format(len(fields))
     return fields
 
 
 def save_crop_fits(f, refx, refy, size, path, ra, dec):
-    """Crops the image to 2*size x 2*size, with (refx, refy)
+    """Crops the image to size x size, with (refx, refy)
        being the cetner of the galaxy."""
+    
+    # check to see if size / 2 pixels are available in all directions
+    # i.e. not near the edge of the image
     size = int(size / 2)
     if refx - size < 0: 
         size = refx
@@ -45,23 +48,17 @@ def save_crop_fits(f, refx, refy, size, path, ra, dec):
     if refy + size > f[0].data.shape[0] - 1:
         size = f[0].data.shape[0] - 1 - refy
 
-    xmin = refx - size
-    xmax = refx + size
-    ymin = refy - size
-    ymax = refy + size
+    xmin, xmax = refx - size, refx + size
+    ymin, ymax = refy - size, refy + size
     
     # create cropped fits
     nf = fits.PrimaryHDU()
     nf.data = f[0].data[ymin : ymax, xmin : xmax]
     nf.header = f[0].header
     
-    # remove the info in the header files that astropy ads
-    #for name in ('VERSIDL', 'VERSUIIL', 'VERSPOP', 'PSKY', 'RERUN'):
-    #    if name in nf.header: del nf.header[name] 
-    
     # update the reference pixel information to be the center of the galaxy
-    nf.header['CRPIX1'] = refx
-    nf.header['CRPIX2'] = refy
+    nf.header['CRPIX1'] = size
+    nf.header['CRPIX2'] = size
     nf.header['CRVAL1'] = float(ra)
     nf.header['CRVAL2'] = float(dec)
     # save the file to specified path
@@ -74,7 +71,7 @@ def get_num_stars(path, prob):
        of stars that have a class probability of prob."""     
     f = None 
     try:
-        proc = subprocess.Popen(['./sex', path, '-CATALOG_NAME', 'star_out.txt'], stderr = subprocess.PIPE)
+        proc = subprocess.Popen(['sex', path, '-CATALOG_NAME', 'star_out.txt'], stderr = subprocess.PIPE)
         out, err = proc.communicate()
         res = proc.wait()
         if res != 0: raise Exception
@@ -86,7 +83,7 @@ def get_num_stars(path, prob):
             # only load in the points that are likely to be stars
             if float(values[3]) >= prob: count += 1 
 
-        print '{} stars found.'.format(count) 
+        print '{} stars found in the image'.format(count) 
         return count
     
     except:
@@ -96,9 +93,6 @@ def get_num_stars(path, prob):
         if f is not None:
             f.close()
             os.remove('star_out.txt')
-
-
-
 
 
 if __name__ == '__main__':
@@ -140,6 +134,8 @@ if __name__ == '__main__':
             exit(1)
     
     os.mkdir(out_path)
+    
+    fields = None
     try:
         fields = download_fields(args.RA, args.DEC, out_path)
     
@@ -166,7 +162,7 @@ if __name__ == '__main__':
             if i == 0:
                 num_stars = 0
                 while num_stars < args.min_num_stars:
-                    crop_size *= 1.25
+                    crop_size *= 1.1
                     print 'Running sextractor on image size of', crop_size
                     res, size_used = save_crop_fits(fields[i], center_x, center_y, crop_size, path, args.RA, args.DEC)
                     num_stars = get_num_stars(path, args.star_class_prob)
@@ -174,7 +170,7 @@ if __name__ == '__main__':
                     if size_used < int(crop_size / 2) * 2: 
                         break
                 result_crops.append(res)
-            # otherwize we assume the crop_size has been found and just crop the image
+            # otherwize assume the crop_size has been found and just crop the image
             else:
                 result_crops.append(save_crop_fits(fields[i], center_x, center_y, crop_size, path, args.RA, args.DEC)[0])
 
@@ -183,27 +179,30 @@ if __name__ == '__main__':
             # if difference is found the find the smallest x and y crop
             if result_crops[i] != result_crops[i+1]: 
                 smin = 10000
-                for c in result_crops:
-                    smin = min(smin, c[0], c[1])
+                for c in result_crops: smin = min(smin, c[0], c[1])
 
                 print 'Recropping images to size', smin
-                # resave each waveband with this new crop
-                for f in os.listdir(out_path): 
-                    os.remove('{}/{}'.format(out_path, f))
+                for f in os.listdir(out_path):  os.remove('{}/{}'.format(out_path, f))
                 for i in range(5):
                     save_crop_fits(fields[i], gal_centers[i][0], gal_centers[i][1], smin, '{}/{}.fits'.format(out_path, color_names[i]), args.RA, args.DEC)
                 
                 break
-                
-    except IndexError, e: 
+               
+    except Exception, e:
+        if fields is not None: 
+            for f in fields: f.close()
         raise e
 
     finally:
         # clean up frame files
         for f in os.listdir(out_path):
             if 'frame' in f:
-                try: pass #os.remove(os.path.join(out_path, f))
+                try: os.remove(os.path.join(out_path, f))
                 except: pass
+       
+        if len([p for p in os.listdir(out_path) if '.fits' in p]) < 2:
+            print 'There was an error and no wavebands could be used, removing the directory\n\n'
+            shutil.rmtree(out_path)
 
         # if core sumps were generated, remove them
         for f in os.listdir('.'):
