@@ -28,6 +28,7 @@ def download_fields(RA, DEC, out_path):
     # return fields as astropy objects
     for f in sorted(os.listdir(out_path)):
         fields.append(fits.open(os.path.join(out_path, f), ignore_missing_end = True))
+    fields[0], fields[1] = fields[1], fields[0]
     print 'Finished downloading {} field images.'.format(len(fields))
     return fields
 
@@ -71,11 +72,12 @@ def get_num_stars(path, prob):
        of stars that have a class probability of prob."""     
     f = None 
     try:
-        proc = subprocess.Popen(['sex', path, '-CATALOG_NAME', 'star_out.txt'], stderr = subprocess.PIPE)
+        proc = subprocess.Popen(['./sex', path, '-CATALOG_NAME', 'star_out.txt'], stderr = subprocess.PIPE)
         out, err = proc.communicate()
         res = proc.wait()
-        if res != 0: raise Exception
-        
+        #if res != 0: raise Exception
+        print res
+
         count = 0 
         f = open('star_out.txt', 'r')
         for line in f.readlines()[4:]:
@@ -86,7 +88,7 @@ def get_num_stars(path, prob):
         print '{} stars found in the image'.format(count) 
         return count
     
-    except:
+    except IndexError:
         raise SextractorError
     
     finally:
@@ -96,6 +98,7 @@ def get_num_stars(path, prob):
 
 
 if __name__ == '__main__':
+    print sys.argv    
     parser = argparse.ArgumentParser()
     parser.add_argument('RA')
     parser.add_argument('DEC')
@@ -103,9 +106,9 @@ if __name__ == '__main__':
     parser.add_argument('-out_dir', default = None, help = 'If set then the images will be saved to outdir/name')
     parser.add_argument('-overwrite', default = 'True', choices = ['True', 'true', '1', 'False', 'false', '0'], help = 'If true then if any galaxies with the same name will be overwritten')
     parser.add_argument('-min_num_stars', default = 10, type = int, help = 'The minimum number of stars needed in at least one waveband image.')
-    parser.add_argument('-star_class_prob', default = 0.7, type = float, help = 'The minimum probablity that an object detected counts as a star, should be in range [0, 1].  A galaxy will require min_num_stars at this probability.')
+    parser.add_argument('-star_class_prob', default = 0.65, type = float, help = 'The minimum probablity that an object detected counts as a star, should be in range [0, 1].  A galaxy will require min_num_stars at this probability.')
     args = parser.parse_args()
-
+    
     out_path = args.name
     
     # check that star arguments are valid
@@ -132,13 +135,13 @@ if __name__ == '__main__':
         else:
             print out_path, 'already exists and will not be overwritten'
             exit(1)
-    
+   
     os.mkdir(out_path)
     
     fields = None
     try:
         fields = download_fields(args.RA, args.DEC, out_path)
-    
+        assert len(fields) == 5
         # X Ref - CRPIX1
         # Y Ref - CRPIX2
         # X Ref Ra - CRVAL1
@@ -147,7 +150,7 @@ if __name__ == '__main__':
         # Ra deg per row pixel - CD1_2
         # Dec deg per col pixel - CD2_1
         # Dec deg per row pixel - CD2_2
-        color_names = ('g', 'i', 'r', 'u', 'z')
+        color_names = ('i', 'g', 'r', 'u', 'z')
         crop_size = 100
         # store the center pixels in case of re-copping
         gal_centers = []
@@ -163,7 +166,7 @@ if __name__ == '__main__':
                 num_stars = 0
                 while num_stars < args.min_num_stars:
                     crop_size *= 1.1
-                    print 'Running sextractor on image size of', crop_size
+                    print 'Running sextractor on image size of', int(crop_size)
                     res, size_used = save_crop_fits(fields[i], center_x, center_y, crop_size, path, args.RA, args.DEC)
                     num_stars = get_num_stars(path, args.star_class_prob)
                     # once the image can no longer get bigger
@@ -194,17 +197,18 @@ if __name__ == '__main__':
         raise e
 
     finally:
+         
         # clean up frame files
         for f in os.listdir(out_path):
             if 'frame' in f:
                 try: os.remove(os.path.join(out_path, f))
                 except: pass
        
-        if len([p for p in os.listdir(out_path) if '.fits' in p]) < 2:
+        if len([1 for p in os.listdir(out_path) if '.fits' in p]) < 2:
             print 'There was an error and no wavebands could be used, removing the directory\n\n'
             shutil.rmtree(out_path)
-
-        # if core sumps were generated, remove them
+        
+        # if core dumps were generated, remove them
         for f in os.listdir('.'):
             if 'core' in f:
                 try: os.remove(f)
