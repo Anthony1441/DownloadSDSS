@@ -5,9 +5,7 @@ import os
 import shutil
 import subprocess
 import sys
-import matplotlib
-matplotlib.use('agg')
-import matplotlib.pyplot as plt
+import numpy as np
 
 
 class DownloadFieldsError(Exception): pass
@@ -17,8 +15,10 @@ class SextractorError(Exception): pass
 
 def download_fields(RA, DEC, out_path):
     """Attempts to download the 5 waveband field images to out_path.  Returns the
-       fields downloaded as fits objects."""
-    print 'Downloading', out_path.split('/')[-1]
+       fields downloaded as fits objects in order of giruz."""
+    
+    print 'Downloading {}...'.format(os.path.basename(out_path))
+
     proc = subprocess.Popen(['./downloadFields.sh', RA, DEC, out_path], stdout = subprocess.PIPE, universal_newlines = True)
     proc.stdout.close()
     res = proc.wait()
@@ -28,12 +28,13 @@ def download_fields(RA, DEC, out_path):
     # return fields as astropy objects
     for f in sorted(os.listdir(out_path)):
         fields.append(fits.open(os.path.join(out_path, f), ignore_missing_end = True))
+    # reverse g and i bands so that i is searched for stars first (it tends to have more)
     fields[0], fields[1] = fields[1], fields[0]
     print 'Finished downloading {} field images.'.format(len(fields))
     return fields
 
 
-def save_crop_fits(f, refx, refy, size, path, ra, dec):
+def crop_fits(f, refx, refy, size, path, ra, dec):
     """Crops the image to size x size, with (refx, refy)
        being the cetner of the galaxy."""
     
@@ -48,6 +49,9 @@ def save_crop_fits(f, refx, refy, size, path, ra, dec):
         size = refy
     if refy + size > f[0].data.shape[0] - 1:
         size = f[0].data.shape[0] - 1 - refy
+    
+    # ensure it is divisible by two (keeps ra dec correct)
+    if size % 2 != 0: size -= 1
 
     xmin, xmax = refx - size, refx + size
     ymin, ymax = refy - size, refy + size
@@ -62,21 +66,23 @@ def save_crop_fits(f, refx, refy, size, path, ra, dec):
     nf.header['CRPIX2'] = size
     nf.header['CRVAL1'] = float(ra)
     nf.header['CRVAL2'] = float(dec)
-    # save the file to specified path
+    return nf
+
+
+def save_fits(nf, path):
     fits.HDUList([nf]).writeto(path, overwrite = True)
-    return nf.data.shape, size * 2
 
 
-def get_num_stars(path, prob):
+def get_num_stars(nf, prob):
     """Runs the sextactor on the fits image and counts the number
        of stars that have a class probability of prob."""     
+    save_fits(nf, 'temp.fits')
     f = None 
     try:
-        proc = subprocess.Popen(['./sex', path, '-CATALOG_NAME', 'star_out.txt'], stderr = subprocess.PIPE)
+        proc = subprocess.Popen(['./sex', 'temp.fits', '-CATALOG_NAME', 'star_out.txt'], stderr = subprocess.PIPE)
         out, err = proc.communicate()
         res = proc.wait()
-        #if res != 0: raise Exception
-        print res
+        if res != 0: raise Exception
 
         count = 0 
         f = open('star_out.txt', 'r')
@@ -85,31 +91,121 @@ def get_num_stars(path, prob):
             # only load in the points that are likely to be stars
             if float(values[3]) >= prob: count += 1 
 
-        print '{} stars found in the image'.format(count) 
         return count
     
-    except IndexError:
+    except:
         raise SextractorError
     
     finally:
         if f is not None:
             f.close()
             os.remove('star_out.txt')
+        os.remove('temp.fits')
 
+
+def save_galaxy_centered(out_path, name, RA, DEC, star_class_prob, min_num_stars):
+     
+    fields = None
+    try:
+        fields = download_fields(RA, DEC, out_path)
+        assert len(fields) == 5
+        
+        '''
+        ---Header Values Used---
+        X Reference Pixel            - CRPIX1
+        Y Reference Pixel            - CRPIX2
+        X Reference Pixel Ra         - CRVAL1
+        Y Reference Pixel Dec        - CRVAL2
+        Ra deg change per row pixel  - CD1_2
+        Dec deg change per col pixel - CD2_1
+        '''
+        
+        # i and g are reversed since i tends to have the most stars, and it will be searched first
+        color_names = ('i', 'g', 'r', 'u', 'z')
+        crop_size = 100
+        # store the center pixels in case of re-copping
+        gal_centers = []
+        result_crops = []
+        
+        for i in range(5):
+            
+            # calculate what the galaxy center pixel is
+            center_x = int(fields[i][0].header['CRPIX1'] - ((fields[i][0].header['CRVAL2'] - float(DEC)) / fields[i][0].header['CD2_1']))
+            center_y = int(fields[i][0].header['CRPIX2'] - ((fields[i][0].header['CRVAL1'] - float(RA)) / fields[i][0].header['CD1_2'])) 
+            gal_centers.append((center_x, center_y))
+            path = os.path.join(out_path, '{}_{}.fits'.format(name, color_names[i]))
+            
+            # if the first waveband, figure out what size the image needs to be
+            if i == 0:
+                num_stars = 0
+                while num_stars < min_num_stars:
+                    crop_size += 50
+                    cropped_nf = crop_fits(fields[i], center_x, center_y, crop_size, path, RA, DEC)
+                    num_stars = get_num_stars(cropped_nf, star_class_prob)
+                    print '{} stars found on image size {}'.format(num_stars, int(crop_size))
+                    
+                    # once the image can no longer get bigger
+                    if cropped_nf.data.shape[0] < int(crop_size / 2) * 2 - 10: 
+                        break
+             
+                result_crops.append(cropped_nf)
+            
+            # otherwize assume the crop size has been found and just crop the image
+            else:
+                result_crops.append(crop_fits(fields[i], center_x, center_y, crop_size, path, RA, DEC))
+
+        # check that all the crops are the same size, if they arent then make them the same (chose smallest one)
+        for i in range(4):
+            # if difference is found the find the smallest x and y crop
+            if result_crops[i].data.shape[0] != result_crops[i + 1].data.shape[0]: 
+                smin = np.inf
+                for c in result_crops: smin = min(smin, c.data.shape[0], c.data.shape[1])
+
+                print 'Recropping images to size', smin
+                for f in os.listdir(out_path): 
+                    os.remove(os.path.join(out_path, f))
+                for i in range(5):
+                    save_fits(crop_fits(fields[i], gal_centers[i][0], gal_centers[i][1], smin, path, RA, DEC), os.path.join(out_path, '{}_{}.fits'.format(name, color_names[i])))
+                
+                break
+               
+    except Exception, e:
+        if fields is not None: 
+            for f in fields: f.close()
+        
+        # keep a list of all that failed
+        with open('download_errs.txt', 'a+') as f:
+            f.write(name + '\n')
+        shutil.rmtree(out_path)
+
+        raise e
+
+    finally:
+         
+        # remove original (big) frame files
+        if os.path.exists(out_path):
+            for f in os.listdir(out_path):
+                if 'frame' in f:
+                    try: os.remove(os.path.join(out_path, f))
+                    except: pass
+            
+        # if core dumps were generated, remove them
+        for f in os.listdir('.'):
+            if 'core' in f:
+                try: os.remove(f)
+                except: pass
+                    
 
 if __name__ == '__main__':
-    print sys.argv    
     parser = argparse.ArgumentParser()
     parser.add_argument('RA')
     parser.add_argument('DEC')
     parser.add_argument('name', help = 'The name (id) of the galaxy')
-    parser.add_argument('-out_dir', default = None, help = 'If set then the images will be saved to outdir/name')
+    parser.add_argument('-out_dir', default = '.', help = 'If set then the images will be saved to outdir/name')
     parser.add_argument('-overwrite', default = 'True', choices = ['True', 'true', '1', 'False', 'false', '0'], help = 'If true then if any galaxies with the same name will be overwritten')
     parser.add_argument('-min_num_stars', default = 10, type = int, help = 'The minimum number of stars needed in at least one waveband image.')
     parser.add_argument('-star_class_prob', default = 0.65, type = float, help = 'The minimum probablity that an object detected counts as a star, should be in range [0, 1].  A galaxy will require min_num_stars at this probability.')
     args = parser.parse_args()
-    
-    out_path = args.name
     
     # check that star arguments are valid
     if args.min_num_stars < 0:
@@ -121,12 +217,11 @@ if __name__ == '__main__':
         exit(1)
 
     # check that out_dir exists
-    if args.out_dir is not None:
-        if not os.path.exists(args.out_dir):
-            print args.out_dir, 'is not a valid directory.'
-            exit(1)
-        else:
-            out_path = os.path.join(args.out_dir, args.name)
+    if not os.path.exists(args.out_dir):
+        print out_dir, 'is not a valid directory.'
+        exit(1)
+    
+    out_path = os.path.join(args.out_dir, args.name)
 
     # create the output directory
     if os.path.exists(out_path):
@@ -135,90 +230,6 @@ if __name__ == '__main__':
         else:
             print out_path, 'already exists and will not be overwritten'
             exit(1)
-   
     os.mkdir(out_path)
     
-    fields = None
-    try:
-        fields = download_fields(args.RA, args.DEC, out_path)
-        assert len(fields) == 5
-        # X Ref - CRPIX1
-        # Y Ref - CRPIX2
-        # X Ref Ra - CRVAL1
-        # Y Ref Dec - CRVAL2
-        # Ra deg per col pixel - CD1_1
-        # Ra deg per row pixel - CD1_2
-        # Dec deg per col pixel - CD2_1
-        # Dec deg per row pixel - CD2_2
-        color_names = ('i', 'g', 'r', 'u', 'z')
-        crop_size = 100
-        # store the center pixels in case of re-copping
-        gal_centers = []
-        result_crops = []
-        for i in range(5):
-            center_x = int(fields[i][0].header['CRPIX1'] - ((fields[i][0].header['CRVAL2'] - float(args.DEC)) / fields[i][0].header['CD2_1']))
-            center_y = int(fields[i][0].header['CRPIX2'] - ((fields[i][0].header['CRVAL1'] - float(args.RA)) / fields[i][0].header['CD1_2'])) 
-            gal_centers.append((center_x, center_y))
-            path = '{}/{}.fits'.format(out_path, color_names[i])
-            
-            # if the first waveband, figure out what zoom level it needs ot be at
-            if i == 0:
-                num_stars = 0
-                while num_stars < args.min_num_stars:
-                    crop_size *= 1.1
-                    print 'Running sextractor on image size of', int(crop_size)
-                    res, size_used = save_crop_fits(fields[i], center_x, center_y, crop_size, path, args.RA, args.DEC)
-                    num_stars = get_num_stars(path, args.star_class_prob)
-                    # once the image can no longer get bigger
-                    if size_used < int(crop_size / 2) * 2: 
-                        break
-                result_crops.append(res)
-            # otherwize assume the crop_size has been found and just crop the image
-            else:
-                result_crops.append(save_crop_fits(fields[i], center_x, center_y, crop_size, path, args.RA, args.DEC)[0])
-
-        # check that all the crops are the same size, if they arent then make them the same (chose smallest one)
-        for i in range(len(result_crops) - 1):
-            # if difference is found the find the smallest x and y crop
-            if result_crops[i] != result_crops[i+1]: 
-                smin = 10000
-                for c in result_crops: smin = min(smin, c[0], c[1])
-
-                print 'Recropping images to size', smin
-                for f in os.listdir(out_path):  os.remove('{}/{}'.format(out_path, f))
-                for i in range(5):
-                    save_crop_fits(fields[i], gal_centers[i][0], gal_centers[i][1], smin, '{}/{}.fits'.format(out_path, color_names[i]), args.RA, args.DEC)
-                
-                break
-               
-    except Exception, e:
-        if fields is not None: 
-            for f in fields: f.close()
-        raise e
-
-    finally:
-         
-        # clean up frame files
-        for f in os.listdir(out_path):
-            if 'frame' in f:
-                try: os.remove(os.path.join(out_path, f))
-                except: pass
-       
-        if len([1 for p in os.listdir(out_path) if '.fits' in p]) < 2:
-            print 'There was an error and no wavebands could be used, removing the directory\n\n'
-            shutil.rmtree(out_path)
-        
-        # if core dumps were generated, remove them
-        for f in os.listdir('.'):
-            if 'core' in f:
-                try: os.remove(f)
-                except: pass
-                    
-
-
-
-
-        
-
-
-
+    save_galaxy_centered(out_path, args.name, args.RA, args.DEC, args.star_class_prob, args.min_num_stars) 
