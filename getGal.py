@@ -81,6 +81,7 @@ def save_fits(nf, path):
 def get_num_stars(nf, prob):
     """Runs the sextactor on the fits image and counts the number
        of stars that have a class probability of prob."""     
+    
     save_fits(nf, 'temp.fits')
     f = None 
     try:
@@ -106,7 +107,9 @@ def get_num_stars(nf, prob):
             os.remove('star_out.txt')
         os.remove('temp.fits')
 
+
 def calc_galaxy_center(header, RA, DEC):
+    """Using the fits header, the center pixel of the galaxy is calculated"""
     
     DEG = header['SPA']
     delta_ra, delta_dec = RA - header['CRVAL1'], DEC - header['CRVAL2']
@@ -139,7 +142,8 @@ def calc_galaxy_center(header, RA, DEC):
        
            
 def save_galaxy_centered(out_path, name, RA, DEC, star_class_prob, min_num_stars):
-     
+    """ Saves the galaxy centered and with enough stars visible for realignment"""
+
     fields = None
     try:
         fields = download_fields(RA, DEC, out_path)
@@ -198,7 +202,7 @@ def save_galaxy_centered(out_path, name, RA, DEC, star_class_prob, min_num_stars
             if result_crops[i].data.shape[0] != result_crops[i + 1].data.shape[0]: 
                 smin = np.inf
                 for c in result_crops: smin = min(smin, c.data.shape[0], c.data.shape[1])
-
+                
                 print 'Recropping images to size', smin
                 for f in os.listdir(out_path): 
                     os.remove(os.path.join(out_path, f))
@@ -206,13 +210,15 @@ def save_galaxy_centered(out_path, name, RA, DEC, star_class_prob, min_num_stars
                     save_fits(crop_fits(fields[i], gal_centers[i][0], gal_centers[i][1], smin, path, RA, DEC), os.path.join(out_path, '{}_{}.fits'.format(name, color_names[i])))
                 
                 break
+        else:
+            for i in range(5): save_fits(result_crops[i], os.path.join(out_path, '{}_{}.fits'.format(name, color_names[i])))
                
     except NoError:
         if fields is not None: 
             for f in fields: f.close()
         
         # keep a list of all that failed
-        with open('download_errs.txt', 'a+') as f:
+        with open(os.path.join('..', 'download_errs.txt'), 'a+') as f:
             f.write(name + '\n')
         shutil.rmtree(out_path)
 
