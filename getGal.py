@@ -112,8 +112,11 @@ def calc_galaxy_center(header, RA, DEC):
     """Using the fits header, the center pixel of the galaxy is calculated"""
     
     DEG = header['SPA']
+    
     delta_ra, delta_dec = RA - header['CRVAL1'], DEC - header['CRVAL2']
-
+    
+    # when the N and E axes are not lined up with the X and Y axes, then we need to find the N and E components
+    # of each X and Y axis
     x1 = np.abs(np.cos(np.deg2rad(DEG - 90.0))) * ((delta_dec * np.cos(np.deg2rad(DEG - 90.0))) / header['CD2_1'])
     x2 = np.abs(np.cos(np.deg2rad(180.0 - DEG))) * ((delta_ra * np.cos(np.deg2rad(180.0 - DEG))) / header['CD1_1'])
     center_x = int(header['CRPIX1'] + x1 + x2)
@@ -122,8 +125,11 @@ def calc_galaxy_center(header, RA, DEC):
     y2 = np.abs(np.sin(np.deg2rad(DEG - 90.0))) * ((delta_dec * np.sin(np.deg2rad(DEG - 90.0))) / header['CD2_2'])
     center_y = int(header['CRPIX2'] + y1 + y2)
 
+    # check that the center is not out of bounds
     if center_x < 0 or center_y < 0 or center_x >= header['NAXIS1'] or center_y >= header['NAXIS2']:
+        # try using the other angle given (not sure when to use SPA or IPA
         DEG = header['IPA']
+        
         delta_ra, delta_dec = RA - header['CRVAL1'], DEC - header['CRVAL2']
     
         x1 = np.abs(np.cos(np.deg2rad(DEG - 90.0))) * ((delta_dec * np.cos(np.deg2rad(DEG - 90.0))) / header['CD2_1'])
@@ -133,8 +139,8 @@ def calc_galaxy_center(header, RA, DEC):
         y1 = np.abs(np.sin(np.deg2rad(180.0 - DEG))) * ((delta_ra * np.sin(np.deg2rad(180.0 - DEG))) / header['CD1_2'])
         y2 = np.abs(np.sin(np.deg2rad(DEG - 90.0))) * ((delta_dec * np.sin(np.deg2rad(DEG - 90.0))) / header['CD2_2'])
         center_y = int(header['CRPIX2'] + y1 + y2)
-
-
+        
+        # if neither works then raise an error
         if center_x < 0 or center_y < 0 or center_x >= header['NAXIS1'] or center_y >= header['NAXIS2']:
             raise GalaxyCenterNotValidError 
 
@@ -213,7 +219,7 @@ def save_galaxy_centered(out_path, name, RA, DEC, star_class_prob, min_num_stars
         else:
             for i in range(5): save_fits(result_crops[i], os.path.join(out_path, '{}_{}.fits'.format(name, color_names[i])))
                
-    except NoError:
+    except:
         if fields is not None: 
             for f in fields: f.close()
         
